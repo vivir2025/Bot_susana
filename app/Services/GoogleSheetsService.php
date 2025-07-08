@@ -1,10 +1,12 @@
 <?php
 
 namespace App\Services;
-use App\Models\RipsData; 
+
 use Google\Client;
 use Google\Service\Sheets;
 use Google\Service\Sheets\ValueRange;
+use App\Models\RipsData;
+use Illuminate\Support\Facades\Log;
 
 class GoogleSheetsService
 {
@@ -13,85 +15,134 @@ class GoogleSheetsService
     protected $spreadsheetId;
 
     public function __construct()
-{
-    $this->client = new Client();
-    // Añade esto para debug
-    if (!file_exists(storage_path('app/google-sheets-credentials.json'))) {
-        throw new \Exception("Archivo de credenciales no encontrado");
-    }
-    $this->client->setAuthConfig(storage_path('app/google-sheets-credentials.json'));
-    $this->client->addScope(Sheets::SPREADSHEETS);
-    
-    // Verifica el spreadsheetId
-    $this->spreadsheetId = env('GOOGLE_SHEETS_SPREADSHEET_ID');
-    if (empty($this->spreadsheetId)) {
-        throw new \Exception("Spreadsheet ID no configurado en .env");
-    }
-    
-    $this->service = new Sheets($this->client);
-}
-
-   public function readData($range)
-{
-    try {
-        $response = $this->service->spreadsheets_values->get(
-            $this->spreadsheetId, 
-            $range,
-            ['majorDimension' => 'ROWS']
-        );
-        
-        \Log::info("Datos leídos de Sheets:", ['data' => $response->getValues()]);
-        
-        return $response->getValues() ?? [];
-    } catch (\Exception $e) {
-        \Log::error("Error al leer de Google Sheets: " . $e->getMessage());
-        return [];
-    }
-}
-
-    public function writeData($range, $data)
     {
-        $valueRange = new ValueRange();
-        $valueRange->setValues($data);
+        $this->client = new Client();
+        $this->client->setAuthConfig(storage_path('app/google-sheets-credentials.json'));
+        $this->client->addScope(Sheets::SPREADSHEETS);
+        $this->spreadsheetId = env('GOOGLE_SHEETS_SPREADSHEET_ID');
+        $this->service = new Sheets($this->client);
+    }
+
+    /**
+     * Sincronización bidireccional
+     * 
+     * @param string $direction 'db-to-sheet' o 'sheet-to-db'
+     * @param string $sheetRange Rango de la hoja (ej: 'Factura!A2:Q100')
+     * @return array Resultado de la operación
+     */
+    public function syncData(string $direction = 'db-to-sheet', string $sheetRange = 'Factura!A1:Q100')
+    {
+        try {
+            if ($direction === 'db-to-sheet') {
+                return $this->exportToSheets($sheetRange);
+            } elseif ($direction === 'sheet-to-db') {
+                return $this->importFromSheets($sheetRange);
+            } else {
+                throw new \Exception("Dirección de sincronización no válida");
+            }
+        } catch (\Exception $e) {
+            Log::error('Error en sincronización: ' . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => $e->getMessage(),
+                'exception' => $e
+            ];
+        }
+    }
+
+    /**
+     * Exporta datos desde la base de datos a Google Sheets
+     */
+    protected function exportToSheets(string $range)
+    {
+        Log::info('Iniciando exportación DB → Google Sheets');
+        
+        $ripsData = RipsData::orderBy('year')->orderBy('month')->get();
+        
+        if ($ripsData->isEmpty()) {
+            throw new \Exception("No hay datos en la base de datos para exportar");
+        }
+        
+        // Preparar datos
+        $sheetData = [
+            [
+                'Año', 'Mes', 'Régimen', 'Facturado', 
+                'Consultas Especializadas', 'Interconsultas Hospitalarias',
+                'Urgencias General', 'Urgencias Especialista',
+                'Egresos Hospitalarios', 'Imagenología', 'Laboratorio',
+                'Partos', 'Cesáreas', 'Cirugías', 'Terapia Física',
+                'Terapia Respiratoria', 'Observaciones'
+            ]
+        ];
+        
+        foreach ($ripsData as $item) {
+            $sheetData[] = [
+                $item->year,
+                $item->month,
+                $item->regimen,
+                $item->facturado,
+                $item->consultas_especializada,
+                $item->interconsultas_hospitalaria,
+                $item->urgencias_general,
+                $item->urgencias_especialista,
+                $item->egresos_hospitalarios,
+                $item->imagenologia,
+                $item->laboratorio,
+                $item->partos,
+                $item->cesareas,
+                $item->cirugias,
+                $item->terapia_fisica,
+                $item->terapia_respiratoria,
+                $item->observaciones
+            ];
+        }
+        
+        // Escribir en Sheets
+        $body = new ValueRange(['values' => $sheetData]);
+        $params = ['valueInputOption' => 'USER_ENTERED']; // Mejor manejo de formatos
         
         $this->service->spreadsheets_values->update(
             $this->spreadsheetId,
             $range,
-            $valueRange,
-            ['valueInputOption' => 'RAW']
+            $body,
+            $params
         );
+        
+        $count = count($sheetData) - 1; // Excluyendo encabezados
+        
+        Log::info("Exportación exitosa. $count registros transferidos");
+        return [
+            'success' => true,
+            'message' => "Datos exportados correctamente ($count registros)",
+            'rows_exported' => $count
+        ];
     }
 
-   public function syncRipsData()
-{
-    \Log::info('Iniciando sincronización de datos RIPS');
-    
-    try {
-        // 1. Leer datos de Google Sheets
-        $sheetData = $this->readData('Factura!A2:Q100'); // Ajustado a 17 columnas (A-Q)
+    /**
+     * Importa datos desde Google Sheets a la base de datos
+     */
+    protected function importFromSheets(string $range)
+    {
+        Log::info('Iniciando importación Google Sheets → DB');
+        
+        $sheetData = $this->readSheetData($range);
         
         if (empty($sheetData)) {
-            \Log::error('No se encontraron datos en Google Sheets');
-            return ['success' => false, 'message' => 'No hay datos en la hoja'];
+            throw new \Exception("No se encontraron datos en el rango especificado");
         }
         
-        \Log::info('Datos leídos de Google Sheets', ['count' => count($sheetData)]);
-        
-        // 2. Procesar cada fila
         $processed = 0;
         $errors = 0;
         
         foreach ($sheetData as $index => $row) {
             try {
-                // Verificar que la fila tenga al menos los campos obligatorios
-                if (count($row) < 4) { // year, month, regimen y facturado son requeridos
-                    \Log::warning('Fila incompleta', ['fila' => $index + 2, 'data' => $row]);
+                if (count($row) < 4) { // Campos mínimos requeridos
+                    Log::warning("Fila incompleta en posición " . ($index + 1));
                     $errors++;
                     continue;
                 }
                 
-                // 3. Insertar o actualizar en la base de datos
-                $result = RipsData::updateOrCreate(
+                RipsData::updateOrCreate(
                     [
                         'year' => $this->parseNumber($row[0]),
                         'month' => $this->parseNumber($row[1]),
@@ -116,20 +167,14 @@ class GoogleSheetsService
                 );
                 
                 $processed++;
-                
             } catch (\Exception $e) {
-                \Log::error('Error procesando fila', [
-                    'fila' => $index + 2,
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString()
-                ]);
+                Log::error("Error procesando fila {$index}: " . $e->getMessage());
                 $errors++;
             }
         }
         
-        // 4. Verificar resultados
-        $message = "Procesados: $processed registros. Errores: $errors";
-        \Log::info($message);
+        $message = "Importación completada. $processed registros actualizados, $errors errores";
+        Log::info($message);
         
         return [
             'success' => true,
@@ -137,21 +182,31 @@ class GoogleSheetsService
             'processed' => $processed,
             'errors' => $errors
         ];
+    }
+
+    /**
+     * Lee datos de Google Sheets
+     */
+    protected function readSheetData(string $range)
+    {
+        $response = $this->service->spreadsheets_values->get(
+            $this->spreadsheetId, 
+            $range,
+            ['majorDimension' => 'ROWS']
+        );
         
-    } catch (\Exception $e) {
-        \Log::error('Error general en syncRipsData: ' . $e->getMessage());
-        return ['success' => false, 'message' => $e->getMessage()];
+        return $response->getValues() ?? [];
+    }
+
+    /**
+     * Limpia y parsea valores numéricos
+     */
+    private function parseNumber($value)
+    {
+        if (is_null($value)) return 0;
+        if (is_numeric($value)) return $value;
+        
+        $cleaned = preg_replace('/[^0-9.-]/', '', (string)$value);
+        return (float)$cleaned ?: 0;
     }
 }
-
-private function parseNumber($value)
-{
-    if (is_null($value)) return 0;
-    if (is_numeric($value)) return $value;
-    
-    // Limpiar formatos de moneda y otros caracteres
-    $cleaned = preg_replace('/[^0-9.-]/', '', $value);
-    return (float) $cleaned ?: 0;
- }
- };
-
