@@ -43,4 +43,5 @@ class RipsData extends Model
         return $query->where('year', $year)
                     ->whereIn('month', $months[$trimester]);
     }
+    
 };

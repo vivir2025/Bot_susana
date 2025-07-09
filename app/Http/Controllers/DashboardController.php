@@ -69,13 +69,35 @@ class DashboardController extends Controller
         list($year1, $month1) = explode('-', $period1);
         list($year2, $month2) = explode('-', $period2);
         
-        $data1 = RipsData::byPeriod($year1, $month1)->get();
-        $data2 = RipsData::byPeriod($year2, $month2)->get();
+        $data1 = RipsData::byPeriod($year1, $month1)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        $data2 = RipsData::byPeriod($year2, $month2)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        // Obtener todos los regímenes únicos
+        $regimenes = collect($data1)->pluck('regimen')
+            ->merge(collect($data2)->pluck('regimen'))
+            ->unique()
+            ->sort()
+            ->values();
         
         return [
-            'period1' => $data1,
-            'period2' => $data2,
-            'comparison' => $this->calculateComparison($data1, $data2)
+            'labels' => $regimenes->toArray(),
+            'comparison' => [
+                'period1_label' => $this->formatMonthLabel($year1, $month1),
+                'period2_label' => $this->formatMonthLabel($year2, $month2),
+                'period1_data' => $this->mapDataToLabels($data1, $regimenes),
+                'period2_data' => $this->mapDataToLabels($data2, $regimenes),
+                'total_period1' => $data1->sum('total'),
+                'total_period2' => $data2->sum('total'),
+                'variance_percentage' => $this->calculateVariance($data1->sum('total'), $data2->sum('total')),
+                'absolute_difference' => $data1->sum('total') - $data2->sum('total')
+            ]
         ];
     }
 
@@ -85,26 +107,101 @@ class DashboardController extends Controller
         list($year1, $quarter1) = explode('-Q', $period1);
         list($year2, $quarter2) = explode('-Q', $period2);
         
-        $data1 = RipsData::byTrimester($year1, $quarter1)->get();
-        $data2 = RipsData::byTrimester($year2, $quarter2)->get();
+        $data1 = RipsData::byTrimester($year1, $quarter1)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        $data2 = RipsData::byTrimester($year2, $quarter2)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        // Obtener todos los regímenes únicos
+        $regimenes = collect($data1)->pluck('regimen')
+            ->merge(collect($data2)->pluck('regimen'))
+            ->unique()
+            ->sort()
+            ->values();
         
         return [
-            'period1' => $data1,
-            'period2' => $data2,
-            'comparison' => $this->calculateComparison($data1, $data2)
+            'labels' => $regimenes->toArray(),
+            'comparison' => [
+                'period1_label' => $this->formatQuarterLabel($year1, $quarter1),
+                'period2_label' => $this->formatQuarterLabel($year2, $quarter2),
+                'period1_data' => $this->mapDataToLabels($data1, $regimenes),
+                'period2_data' => $this->mapDataToLabels($data2, $regimenes),
+                'total_period1' => $data1->sum('total'),
+                'total_period2' => $data2->sum('total'),
+                'variance_percentage' => $this->calculateVariance($data1->sum('total'), $data2->sum('total')),
+                'absolute_difference' => $data1->sum('total') - $data2->sum('total')
+            ]
         ];
     }
 
     private function compareYears($year1, $year2)
     {
-        $data1 = RipsData::byPeriod($year1)->get();
-        $data2 = RipsData::byPeriod($year2)->get();
+        $data1 = RipsData::byPeriod($year1)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        $data2 = RipsData::byPeriod($year2)
+            ->selectRaw('regimen, SUM(facturado) as total')
+            ->groupBy('regimen')
+            ->get();
+        
+        // Obtener todos los regímenes únicos
+        $regimenes = collect($data1)->pluck('regimen')
+            ->merge(collect($data2)->pluck('regimen'))
+            ->unique()
+            ->sort()
+            ->values();
         
         return [
-            'period1' => $data1,
-            'period2' => $data2,
-            'comparison' => $this->calculateComparison($data1, $data2)
+            'labels' => $regimenes->toArray(),
+            'comparison' => [
+                'period1_label' => "Año {$year1}",
+                'period2_label' => "Año {$year2}",
+                'period1_data' => $this->mapDataToLabels($data1, $regimenes),
+                'period2_data' => $this->mapDataToLabels($data2, $regimenes),
+                'total_period1' => $data1->sum('total'),
+                'total_period2' => $data2->sum('total'),
+                'variance_percentage' => $this->calculateVariance($data1->sum('total'), $data2->sum('total')),
+                'absolute_difference' => $data1->sum('total') - $data2->sum('total')
+            ]
         ];
+    }
+
+    private function mapDataToLabels($data, $labels)
+    {
+        $result = [];
+        foreach ($labels as $label) {
+            $item = $data->firstWhere('regimen', $label);
+            $result[] = $item ? $item->total : 0;
+        }
+        return $result;
+    }
+
+    private function formatMonthLabel($year, $month)
+    {
+        $months = [
+            1 => 'Enero', 2 => 'Febrero', 3 => 'Marzo', 4 => 'Abril',
+            5 => 'Mayo', 6 => 'Junio', 7 => 'Julio', 8 => 'Agosto',
+            9 => 'Septiembre', 10 => 'Octubre', 11 => 'Noviembre', 12 => 'Diciembre'
+        ];
+        return $months[(int)$month] . ' ' . $year;
+    }
+
+    private function formatQuarterLabel($year, $quarter)
+    {
+        return "Q{$quarter} {$year}";
+    }
+
+    private function calculateVariance($value1, $value2)
+    {
+        if ($value2 == 0) return 0;
+        return round((($value1 - $value2) / $value2) * 100, 2);
     }
 
     private function calculateComparison($data1, $data2)
