@@ -20,6 +20,19 @@ class RipsData extends Model
 
     protected $casts = [
         'facturado' => 'decimal:2',
+        'consultas_especializada' => 'integer',
+        'interconsultas_hospitalaria' => 'integer',
+        'urgencias_general' => 'integer',
+        'urgencias_especialista' => 'integer',
+        'egresos_hospitalarios' => 'integer',
+        'imagenologia' => 'integer',
+        'laboratorio' => 'integer',
+        'partos' => 'integer',
+        'cesareas' => 'integer',
+        'cirugias' => 'integer',
+        'terapia_fisica' => 'integer',
+        'terapia_respiratoria' => 'integer',
+        'observaciones' => 'integer'
     ];
 
     public function scopeByPeriod($query, $year, $month = null)
